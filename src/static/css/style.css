@@ -1,0 +1,66 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap');
+
+:root {
+    --isi-navy: #0f172a;
+    --isi-blue: #2563eb;
+    --isi-gold: #fbbf24;
+    --bg-soft: #f1f5f9;
+}
+
+body {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    background-color: var(--bg-soft);
+    color: var(--isi-navy);
+}
+
+/* Carte Bancaire Premium */
+.premium-card {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    border-radius: 24px;
+    padding: 30px;
+    color: white;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+    position: relative;
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+
+.premium-card::before {
+    content: "";
+    position: absolute;
+    top: -50px; right: -50px;
+    width: 150px; height: 150px;
+    background: rgba(37, 99, 235, 0.2);
+    filter: blur(40px);
+    border-radius: 50%;
+}
+
+/* Boutons Modernes */
+.btn-isi {
+    background: var(--isi-blue);
+    color: white;
+    border-radius: 12px;
+    padding: 12px 24px;
+    font-weight: 600;
+    transition: 0.3s;
+    border: none;
+}
+
+.btn-isi:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 15px rgba(37, 99, 235, 0.3);
+}
+
+/* Tableaux de bord */
+.glass-panel {
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(10px);
+    border-radius: 20px;
+    border: 1px solid white;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.05);
+}
+
+.nav-isi {
+    background: var(--isi-navy);
+    padding: 15px 30px;
+}

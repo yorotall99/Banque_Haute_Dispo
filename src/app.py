@@ -1,70 +1,85 @@
 import os
 import pymysql
+import random
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 from functools import wraps
 from datetime import datetime
 from dotenv import load_dotenv
 
+# Chargement des variables d'environnement
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY', 'isi_dakar_2026_key')
+app.secret_key = os.getenv('SECRET_KEY', 'isi_dakar_secret_key_2026')
 
 
-# --- CONNEXION RDS ---
+# --- CONFIGURATION DE LA CONNEXION DB ---
 def get_db_connection():
+    ssl_cert_path = './global-bundle.pem'
+    ssl_config = {'ca': ssl_cert_path} if os.path.exists(ssl_cert_path) else None
     try:
-        return pymysql.connect(
+        conn = pymysql.connect(
             host=os.getenv('DB_HOST'),
             user=os.getenv('DB_USER'),
             password=os.getenv('DB_PASS'),
             database=os.getenv('DB_NAME'),
             cursorclass=pymysql.cursors.DictCursor,
-            autocommit=False
+            ssl=ssl_config,
+            connect_timeout=10
         )
-    except pymysql.MySQLError as e:
-        print(f"❌ Erreur RDS : {e}")
+        return conn
+    except Exception as e:
+        print(f"❌ ERREUR CONNEXION DB : {e}")
         return None
 
 
-# --- AUTHENTIFICATION ---
-EMPLOYEES = {"admin": "IsiAdmin2026", "amadou.tall": "Isibank2026"}
+# --- PROTECTION DES PAGES ---
+def login_required(role=None):
+    def wrapper(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if 'user' not in session:
+                return redirect(url_for('login'))
+            if role and session.get('role') != role:
+                flash("Accès non autorisé.", "danger")
+                return redirect(url_for('home'))
+            return f(*args, **kwargs)
+        return decorated
+    return wrapper
 
 
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session:
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-
-    return decorated_function
+# --- ROUTES D'AUTHENTIFICATION ---
+@app.route('/')
+def home():
+    if 'role' in session:
+        if session['role'] == 'employer': return redirect(url_for('staff_dashboard'))
+        if session['role'] == 'admin': return redirect(url_for('admin_dashboard'))
+        return redirect(url_for('client_dashboard'))
+    return redirect(url_for('login'))
 
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        role = request.form.get('role')
+        username_saisi = request.form.get('username')
+        password_saisi = request.form.get('password')
+        role_saisi = request.form.get('role')
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, fullname, password, role FROM users WHERE username=%s", (username_saisi,))
+                res = cur.fetchone()
+                if res and res['role'] == role_saisi and res['password'] == password_saisi:
+                    session['user'] = res['fullname']
+                    session['client_id'] = res['id']
+                    session['role'] = res['role']
 
-        if role == 'employer' and EMPLOYEES.get(username) == password:
-            session.update({'logged_in': True, 'role': 'employer', 'user': username})
-            return redirect(url_for('index'))
+                    if res['role'] == 'employer': return redirect(url_for('staff_dashboard'))
+                    if res['role'] == 'admin': return redirect(url_for('admin_dashboard'))
+                    return redirect(url_for('client_dashboard'))
 
-        elif role == 'client':
-            conn = get_db_connection()
-            if conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT * FROM users WHERE fullname=%s AND password=%s", (username, password))
-                    user = cur.fetchone()
-                    if user:
-                        session.update({'logged_in': True, 'role': 'client', 'user': username})
-                        conn.close()
-                        return redirect(url_for('client_dashboard'))
-                conn.close()
-
-        flash("Identifiants ou rôle incorrects", "danger")
+                flash("Identifiants ou rôle incorrects.", "danger")
+            conn.close()
     return render_template('login.html')
 
 
@@ -74,98 +89,122 @@ def logout():
     return redirect(url_for('login'))
 
 
-# --- INTERFACES ---
-
-@app.route('/')
-@login_required
-def index():
-    if session.get('role') != 'employer':
-        return redirect(url_for('client_dashboard'))
+# --- ESPACE PERSONNEL (STAFF) ---
+@app.route('/staff')
+@login_required(role='employer')
+def staff_dashboard():
     conn = get_db_connection()
-    try:
+    accounts = []
+    if conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM users ORDER BY id DESC")
+            cur.execute("SELECT id, fullname, account_number, balance FROM users WHERE role='client'")
             accounts = cur.fetchall()
-        return render_template('index.html', accounts=accounts)
-    finally:
         conn.close()
+    return render_template('staff_interface.html', accounts=accounts)
 
 
-@app.route('/client_dashboard')
-@login_required
+# --- ESPACE ADMINISTRATEUR (HQ) ---
+@app.route('/admin')
+@login_required(role='admin')
+def admin_dashboard():
+    conn = get_db_connection()
+    stats = {'b': 0, 'c': 0}
+    logs = []
+    if conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT SUM(balance) as total_b, COUNT(id) as total_c FROM users WHERE role='client'")
+            res = cur.fetchone()
+            if res:
+                stats = {'b': res['total_b'] or 0, 'c': res['total_c']}
+            try:
+                cur.execute("SELECT * FROM transactions ORDER BY timestamp DESC LIMIT 10")
+                logs = cur.fetchall()
+            except:
+                logs = []
+        conn.close()
+    return render_template('index.html', stats=stats, logs=logs)
+
+
+# --- ESPACE CLIENT ---
+@app.route('/client')
+@login_required(role='client')
 def client_dashboard():
     conn = get_db_connection()
-    try:
+    user_data = None
+    transactions = []
+    if conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE fullname = %s", (session['user'],))
+            cur.execute("SELECT * FROM users WHERE id=%s", (session['client_id'],))
             user_data = cur.fetchone()
-            cur.execute("SELECT * FROM transactions WHERE sender_fullname = %s ORDER BY timestamp DESC",
-                        (session['user'],))
-            txs = cur.fetchall()
-        return render_template('client_dashboard.html', user=user_data, transactions=txs)
-    finally:
+            try:
+                cur.execute(
+                    "SELECT amount, receiver_account, timestamp FROM transactions WHERE sender_fullname=%s ORDER BY timestamp DESC",
+                    (user_data['fullname'],))
+                transactions = cur.fetchall()
+            except:
+                transactions = []
         conn.close()
+    return render_template('client_dashboard.html', user=user_data, transactions=transactions)
 
 
-# --- ACTIONS ---
+# --- ACTIONS CLIENT (Redéfini pour corriger l'erreur BuildError) ---
+@app.route('/client/transfer', methods=['POST'])
+@login_required(role='client')
+def client_transfer():
+    flash("Le service de virement est temporairement indisponible.", "warning")
+    return redirect(url_for('client_dashboard'))
 
-@app.route('/add_account', methods=['POST'])
-@login_required
-def add_account():
-    if session.get('role') != 'employer': return "Interdit", 403
-    f, e, a, b, p = request.form.get('fullname'), request.form.get('email'), request.form.get(
-        'account_number'), request.form.get('balance', 0), request.form.get('password', '1234')
+
+@app.route('/client/mobile-deposit', methods=['POST'])
+@login_required(role='client')
+def client_mobile_deposit():
+    amount = request.form.get('amount')
+    flash(f"Demande de dépôt de {amount} XOF envoyée.", "info")
+    return redirect(url_for('client_dashboard'))
+
+
+# --- ACTIONS STAFF & API ---
+@app.route('/staff/register', methods=['POST'])
+@login_required(role='employer')
+def staff_register():
+    fullname = request.form.get('fullname')
+    email = request.form.get('email')
+    acc_num = f"ISI-{random.randint(100000, 999999)}"
     conn = get_db_connection()
-    try:
+    if conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO users (fullname, email, account_number, balance, password) VALUES (%s, %s, %s, %s, %s)",
-                (f, e, a, b, p))
-        conn.commit()
-        flash("Compte créé avec succès !", "success")
-    except Exception as err:
-        conn.rollback()
-        flash(f"Erreur : {err}", "danger")
-    finally:
+                "INSERT INTO users (fullname, username, password, role, balance, account_number) VALUES (%s, %s, '1234', 'client', 0, %s)",
+                (fullname, email, acc_num))
+            conn.commit()
+            flash(f"Compte {acc_num} créé", "success")
         conn.close()
-    return redirect(url_for('index'))
+    return redirect(url_for('staff_dashboard'))
 
 
-@app.route('/transfer', methods=['POST'])
-@login_required
-def transfer():
-    receiver_acc = request.form.get('receiver_account')
-    amount = float(request.form.get('amount'))
+@app.route('/staff/transaction', methods=['POST'])
+@login_required(role='employer')
+def staff_transaction():
+    client_id = request.form.get('client_id')
+    amount = int(request.form.get('amount'))
+    type_op = request.form.get('type')
     conn = get_db_connection()
-    try:
+    if conn:
         with conn.cursor() as cur:
-            if session.get('role') == 'client':
-                cur.execute("SELECT id, fullname, balance FROM users WHERE fullname=%s FOR UPDATE", (session['user'],))
-            else:
-                cur.execute("SELECT id, fullname, balance FROM users WHERE id=%s FOR UPDATE",
-                            (request.form.get('sender_id'),))
-
-            sender = cur.fetchone()
-            if not sender or sender['balance'] < amount:
-                flash("Solde insuffisant !", "danger")
-                return redirect(url_for('index' if session['role'] == 'employer' else 'client_dashboard'))
-
-            cur.execute("UPDATE users SET balance = balance - %s WHERE id = %s", (amount, sender['id']))
-            cur.execute("UPDATE users SET balance = balance + %s WHERE account_number = %s", (amount, receiver_acc))
-
-            if cur.rowcount == 0: raise Exception("Compte destinataire introuvable.")
-
-            cur.execute("INSERT INTO transactions (sender_fullname, receiver_account, amount) VALUES (%s, %s, %s)",
-                        (sender['fullname'], receiver_acc, amount))
-        conn.commit()
-        flash("Virement effectué !", "success")
-    except Exception as e:
-        conn.rollback()
-        flash(f"Erreur : {e}", "danger")
-    finally:
+            sql = "UPDATE users SET balance = balance + %s WHERE id = %s" if type_op == 'deposit' else "UPDATE users SET balance = balance - %s WHERE id = %s"
+            cur.execute(sql, (amount, client_id))
+            conn.commit()
+            flash("Transaction réussie", "success")
         conn.close()
-    return redirect(url_for('index' if session['role'] == 'employer' else 'client_dashboard'))
+    return redirect(url_for('staff_dashboard'))
+
+
+@app.route('/api/enrolment', methods=['POST'])
+def field_enrolment():
+    fullname = request.form.get('fullname')
+    flash(f"Enrôlement de {fullname} reçu.", "success")
+    return redirect(url_for('login'))
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)
